@@ -2,6 +2,10 @@
 
 require_once "../auth/verifier_session.php";
 require_once "../config/database.php";
+require_once "../vendor/autoload.php";
+
+use Dompdf\Dompdf;
+use Dompdf\Options;
 
 if($_SESSION["role"] !== "ENSEIGNANT"){
     header("Location: ../auth/login.php");
@@ -11,7 +15,7 @@ if($_SESSION["role"] !== "ENSEIGNANT"){
 $idUtilisateur = $_SESSION["id_utilisateur"];
 
 $dateDebut = $_GET["date_debut"] ?? "";
-$dateFin   = $_GET["date_fin"] ?? "";
+$dateFin = $_GET["date_fin"] ?? "";
 
 $stmtEns = $pdo->prepare("
     SELECT 
@@ -19,8 +23,6 @@ $stmtEns = $pdo->prepare("
         e.nom,
         e.prenoms,
         e.statut,
-        e.email,
-        e.telephone,
         g.libelle_grade,
         g.charge_statutaire
     FROM enseignant e
@@ -28,283 +30,262 @@ $stmtEns = $pdo->prepare("
     WHERE e.id_utilisateur = ?
     LIMIT 1
 ");
-
 $stmtEns->execute([$idUtilisateur]);
 $enseignant = $stmtEns->fetch(PDO::FETCH_ASSOC);
 
 if(!$enseignant){
-    die("Aucun profil enseignant n’est lié à ce compte utilisateur.");
+    die("Aucun enseignant associé à ce compte utilisateur.");
 }
 
-$sqlStats = "
-    SELECT 
-        COUNT(*) AS total_activites,
-        COALESCE(SUM(nombre_heures), 0) AS total_heures,
-        COALESCE(SUM(nb_sequences), 0) AS total_sequences,
-        COALESCE(SUM(volume_horaire_calcule), 0) AS volume_total
-    FROM activite_pedagogique
-    WHERE id_enseignant = :id_enseignant
-      AND statut_validation = 'VALIDEE'
-";
-
-$params = [
-    "id_enseignant" => $enseignant["id_enseignant"]
-];
-
-if($dateDebut !== "" && $dateFin !== ""){
-    $sqlStats .= "
-        AND DATE(date_saisie) BETWEEN :date_debut AND :date_fin
-    ";
-
-    $params["date_debut"] = $dateDebut;
-    $params["date_fin"] = $dateFin;
-}
-
-$stmtStats = $pdo->prepare($sqlStats);
-$stmtStats->execute($params);
-$stats = $stmtStats->fetch(PDO::FETCH_ASSOC);
-
-$volumeTotal = (float)$stats["volume_total"];
+$idEnseignant = $enseignant["id_enseignant"];
+$statut = $enseignant["statut"];
 $chargeStatutaire = (float)($enseignant["charge_statutaire"] ?? 0);
 
-if($enseignant["statut"] === "PERMANENT"){
-    $heuresComplementaires = max(0, $volumeTotal - $chargeStatutaire);
-    $texteHC = number_format($heuresComplementaires, 2, ',', ' ') . " h";
-}else{
-    $texteHC = "Non concerné";
+$where = "ap.id_enseignant = ? AND ap.statut_validation = 'VALIDEE'";
+$params = [$idEnseignant];
+
+if($dateDebut !== ""){
+    $where .= " AND DATE(ap.date_saisie) >= ?";
+    $params[] = $dateDebut;
 }
 
-$sqlDetails = "
-    SELECT
+if($dateFin !== ""){
+    $where .= " AND DATE(ap.date_saisie) <= ?";
+    $params[] = $dateFin;
+}
+
+$stmtActivites = $pdo->prepare("
+    SELECT 
         ap.date_saisie,
-        c.intitule_cours,
-        r.titre_ressource,
         ap.type_activite,
         ap.niveau_complexite,
-        ap.nombre_heures,
         ap.nb_sequences,
-        ap.volume_horaire_calcule
+        ap.volume_horaire_calcule,
+        ap.observation,
+        c.intitule_cours AS cours
     FROM activite_pedagogique ap
-    JOIN cours c ON c.id_cours = ap.id_cours
-    LEFT JOIN ressource_pedagogique r ON r.id_ressource = ap.id_ressource
-    WHERE ap.id_enseignant = :id_enseignant
-      AND ap.statut_validation = 'VALIDEE'
-";
+    LEFT JOIN cours c ON c.id_cours = ap.id_cours
+    WHERE $where
+    ORDER BY ap.date_saisie ASC
+");
+$stmtActivites->execute($params);
+$activites = $stmtActivites->fetchAll(PDO::FETCH_ASSOC);
 
-if($dateDebut !== "" && $dateFin !== ""){
-    $sqlDetails .= "
-        AND DATE(ap.date_saisie) BETWEEN :date_debut AND :date_fin
-    ";
+$totalVolume = 0;
+
+foreach($activites as $activite){
+    $totalVolume += (float)$activite["volume_horaire_calcule"];
 }
 
-$sqlDetails .= "
-    ORDER BY ap.date_saisie DESC
-";
+$heuresComplementaires = 0;
 
-$stmtDetails = $pdo->prepare($sqlDetails);
-$stmtDetails->execute($params);
-$details = $stmtDetails->fetchAll(PDO::FETCH_ASSOC);
+if($statut === "PERMANENT"){
+    $heuresComplementaires = max(0, $totalVolume - $chargeStatutaire);
+}
 
+$periode = "Toutes les périodes";
+
+if($dateDebut !== "" && $dateFin !== ""){
+    $periode = "Du " . date("d/m/Y", strtotime($dateDebut)) . " au " . date("d/m/Y", strtotime($dateFin));
+}
+elseif($dateDebut !== ""){
+    $periode = "À partir du " . date("d/m/Y", strtotime($dateDebut));
+}
+elseif($dateFin !== ""){
+    $periode = "Jusqu’au " . date("d/m/Y", strtotime($dateFin));
+}
+
+ob_start();
 ?>
 
-<?php require_once "../includes/header.php"; ?>
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
 
-<div class="wrapper">
+    <style>
+        body{
+            font-family: DejaVu Sans, Arial, sans-serif;
+            font-size: 12px;
+            color:#111827;
+        }
 
-    <?php require_once "../includes/sidebar_enseignant.php"; ?>
+        .header{
+            text-align:center;
+            border-bottom:2px solid #1e3a8a;
+            padding-bottom:12px;
+            margin-bottom:20px;
+        }
 
-    <main class="main">
+        h1{
+            color:#1e3a8a;
+            margin:0;
+            font-size:22px;
+        }
 
-        <header class="topbar">
-            <div>
-                <h1>Mon récapitulatif</h1>
-                <p>Récapitulatif individuel des activités pédagogiques validées.</p>
-            </div>
+        .subtitle{
+            margin-top:6px;
+            color:#475569;
+        }
 
-            <div class="user-box">
-                <span><?= date("d/m/Y") ?></span>
-                <strong><?= htmlspecialchars($_SESSION["login"]) ?></strong>
-                <small>ENSEIGNANT</small>
-            </div>
-        </header>
+        .info{
+            margin-bottom:18px;
+            padding:12px;
+            background:#f1f5f9;
+            border-radius:8px;
+        }
 
-        <section class="content">
+        .info p{
+            margin:4px 0;
+        }
 
-            <div class="filter-card no-print">
-                <form method="GET" class="filter-form">
+        .stats{
+            width:100%;
+            margin-bottom:20px;
+            border-collapse:collapse;
+        }
 
-                    <div class="form-group">
-                        <label>Date début</label>
-                        <input 
-                            type="date" 
-                            name="date_debut"
-                            value="<?= htmlspecialchars($dateDebut) ?>"
-                        >
-                    </div>
+        .stats td{
+            border:1px solid #cbd5e1;
+            padding:10px;
+            text-align:center;
+            font-weight:bold;
+        }
 
-                    <div class="form-group">
-                        <label>Date fin</label>
-                        <input 
-                            type="date" 
-                            name="date_fin"
-                            value="<?= htmlspecialchars($dateFin) ?>"
-                        >
-                    </div>
+        .stats .label{
+            background:#e0f2fe;
+            color:#1e3a8a;
+        }
 
-                    <button type="submit" class="btn-primary">
-                        Filtrer
-                    </button>
+        table{
+            width:100%;
+            border-collapse:collapse;
+        }
 
-                    <a href="mon_recapitulatif.php" class="btn-secondary">
-                        Réinitialiser
-                    </a>
+        th{
+            background:#1e1b4b;
+            color:white;
+            padding:8px;
+            font-size:11px;
+        }
 
-                    <button type="button" onclick="window.print()" class="btn-primary">
-                        Imprimer / PDF
-                    </button>
+        td{
+            border:1px solid #cbd5e1;
+            padding:7px;
+            font-size:10.5px;
+        }
 
-                </form>
-            </div>
+        .right{
+            text-align:right;
+        }
 
-            <div class="table-card">
+        .footer{
+            margin-top:25px;
+            font-size:10px;
+            color:#64748b;
+            text-align:center;
+        }
+    </style>
+</head>
 
-                <h2>Fiche récapitulative individuelle</h2>
+<body>
 
-                <p>
-                    <strong>Enseignant :</strong>
-                    <?= htmlspecialchars($enseignant["nom"] . " " . $enseignant["prenoms"]) ?>
-                </p>
+    <div class="header">
+        <h1>Récapitulatif des activités pédagogiques</h1>
+        <div class="subtitle">Université Virtuelle de Côte d’Ivoire — Gestion des heures</div>
+    </div>
 
-                <p>
-                    <strong>Grade :</strong>
-                    <?= htmlspecialchars($enseignant["libelle_grade"] ?? "Non défini") ?>
-                </p>
+    <div class="info">
+        <p><strong>Enseignant :</strong> <?= htmlspecialchars($enseignant["nom"] . " " . $enseignant["prenoms"]) ?></p>
+        <p><strong>Grade :</strong> <?= htmlspecialchars($enseignant["libelle_grade"] ?? "Non défini") ?></p>
+        <p><strong>Statut :</strong> <?= htmlspecialchars($statut) ?></p>
+        <p><strong>Période :</strong> <?= htmlspecialchars($periode) ?></p>
+    </div>
 
-                <p>
-                    <strong>Statut :</strong>
-                    <?= htmlspecialchars($enseignant["statut"]) ?>
-                </p>
+    <table class="stats">
+        <tr>
+            <td class="label">Volume validé</td>
+            <td class="label">Charge statutaire</td>
+            <td class="label">Heures complémentaires</td>
+        </tr>
+        <tr>
+            <td><?= number_format($totalVolume, 2, ",", " ") ?> h</td>
 
-                <p>
-                    <strong>Email :</strong>
-                    <?= htmlspecialchars($enseignant["email"]) ?>
-                </p>
+            <td>
+                <?php if($statut === "VACATAIRE"): ?>
+                    Non concerné
+                <?php else: ?>
+                    <?= number_format($chargeStatutaire, 2, ",", " ") ?> h
+                <?php endif; ?>
+            </td>
 
-                <p>
-                    <strong>Téléphone :</strong>
-                    <?= htmlspecialchars($enseignant["telephone"]) ?>
-                </p>
+            <td>
+                <?php if($statut === "VACATAIRE"): ?>
+                    Non concerné
+                <?php else: ?>
+                    <?= number_format($heuresComplementaires, 2, ",", " ") ?> h
+                <?php endif; ?>
+            </td>
+        </tr>
+    </table>
 
-                <p>
-                    <strong>Période :</strong>
-                    <?php if($dateDebut !== "" && $dateFin !== ""): ?>
-                        du <?= date("d/m/Y", strtotime($dateDebut)) ?>
-                        au <?= date("d/m/Y", strtotime($dateFin)) ?>
-                    <?php else: ?>
-                        Toutes les périodes
-                    <?php endif; ?>
-                </p>
+    <table>
+        <thead>
+            <tr>
+                <th>Date</th>
+                <th>Cours</th>
+                <th>Type activité</th>
+                <th>Niveau</th>
+                <th>Séquences</th>
+                <th>Volume</th>
+                <th>Observation</th>
+            </tr>
+        </thead>
 
-            </div>
+        <tbody>
+            <?php if(empty($activites)): ?>
+                <tr>
+                    <td colspan="7" style="text-align:center;">
+                        Aucune activité validée trouvée pour cette période.
+                    </td>
+                </tr>
+            <?php else: ?>
+                <?php foreach($activites as $activite): ?>
+                    <tr>
+                        <td><?= htmlspecialchars(date("d/m/Y", strtotime($activite["date_saisie"]))) ?></td>
+                        <td><?= htmlspecialchars($activite["cours"] ?? "Non renseigné") ?></td>
+                        <td><?= htmlspecialchars($activite["type_activite"]) ?></td>
+                        <td><?= htmlspecialchars($activite["niveau_complexite"]) ?></td>
+                        <td class="right"><?= htmlspecialchars($activite["nb_sequences"]) ?></td>
+                        <td class="right"><?= number_format((float)$activite["volume_horaire_calcule"], 2, ",", " ") ?> h</td>
+                        <td><?= htmlspecialchars($activite["observation"]) ?></td>
+                    </tr>
+                <?php endforeach; ?>
+            <?php endif; ?>
+        </tbody>
+    </table>
 
-            <br>
+    <div class="footer">
+        Document généré automatiquement le <?= date("d/m/Y à H:i") ?>.
+    </div>
 
-            <div class="cards">
+</body>
+</html>
 
-                <div class="card">
-                    <h3>Activités validées</h3>
-                    <p><?= (int)$stats["total_activites"] ?></p>
-                </div>
+<?php
 
-                <div class="card">
-                    <h3>Heures saisies</h3>
-                    <p><?= number_format($stats["total_heures"], 2, ',', ' ') ?></p>
-                    <small>heures</small>
-                </div>
+$html = ob_get_clean();
 
-                <div class="card">
-                    <h3>Séquences</h3>
-                    <p><?= number_format($stats["total_sequences"], 0, ',', ' ') ?></p>
-                    <small>séquences</small>
-                </div>
+$options = new Options();
+$options->set("isHtml5ParserEnabled", true);
+$options->set("isRemoteEnabled", true);
 
-                <div class="card">
-                    <h3>Volume horaire validé</h3>
-                    <p><?= number_format($volumeTotal, 2, ',', ' ') ?></p>
-                    <small>heures</small>
-                </div>
+$dompdf = new Dompdf($options);
+$dompdf->loadHtml($html);
+$dompdf->setPaper("A4", "landscape");
+$dompdf->render();
 
-                <div class="card">
-                    <h3>Heures complémentaires</h3>
-                    <p><?= htmlspecialchars($texteHC) ?></p>
-                </div>
+$filename = "recapitulatif_" . $enseignant["nom"] . "_" . date("Ymd_His") . ".pdf";
 
-            </div>
-
-            <br>
-
-            <div class="table-card">
-
-                <div class="table-header">
-                    <h2>Détail des activités validées</h2>
-
-                    <a href="dashboard.php" class="btn-secondary no-print">
-                        Retour
-                    </a>
-                </div>
-
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>Date</th>
-                            <th>Cours</th>
-                            <th>Ressource</th>
-                            <th>Type</th>
-                            <th>Niveau</th>
-                            <th>Heures</th>
-                            <th>Séquences</th>
-                            <th>Volume calculé</th>
-                        </tr>
-                    </thead>
-
-                    <tbody>
-                        <?php if(count($details) > 0): ?>
-
-                            <?php foreach($details as $d): ?>
-                                <tr>
-                                    <td><?= date("d/m/Y", strtotime($d["date_saisie"])) ?></td>
-                                    <td><?= htmlspecialchars($d["intitule_cours"]) ?></td>
-                                    <td><?= htmlspecialchars($d["titre_ressource"] ?? "Non précisée") ?></td>
-                                    <td><?= htmlspecialchars($d["type_activite"]) ?></td>
-                                    <td><?= htmlspecialchars($d["niveau_complexite"]) ?></td>
-                                    <td><?= number_format($d["nombre_heures"], 2, ',', ' ') ?> h</td>
-                                    <td><?= htmlspecialchars($d["nb_sequences"]) ?></td>
-                                    <td>
-                                        <strong>
-                                            <?= number_format($d["volume_horaire_calcule"], 2, ',', ' ') ?> h
-                                        </strong>
-                                    </td>
-                                </tr>
-                            <?php endforeach; ?>
-
-                        <?php else: ?>
-
-                            <tr>
-                                <td colspan="8" class="empty">
-                                    Aucune activité validée pour cette période.
-                                </td>
-                            </tr>
-
-                        <?php endif; ?>
-                    </tbody>
-                </table>
-
-            </div>
-
-        </section>
-
-        <?php require_once "../includes/footer.php"; ?>
-
-    </main>
-
-</div>
+$dompdf->stream($filename, ["Attachment" => true]);
+exit;

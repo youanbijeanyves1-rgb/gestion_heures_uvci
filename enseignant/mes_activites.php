@@ -11,20 +11,39 @@ if($_SESSION["role"] !== "ENSEIGNANT"){
 $idUtilisateur = $_SESSION["id_utilisateur"];
 
 $stmtEns = $pdo->prepare("
-    SELECT id_enseignant, nom, prenoms, statut
-    FROM enseignant
-    WHERE id_utilisateur = ?
+    SELECT 
+        e.id_enseignant,
+        e.nom,
+        e.prenoms,
+        e.statut,
+        g.libelle_grade
+    FROM enseignant e
+    LEFT JOIN grade g ON g.id_grade = e.id_grade
+    WHERE e.id_utilisateur = ?
     LIMIT 1
 ");
+
 $stmtEns->execute([$idUtilisateur]);
 $enseignant = $stmtEns->fetch(PDO::FETCH_ASSOC);
 
 if(!$enseignant){
-    die("Aucun profil enseignant n’est lié à ce compte utilisateur.");
+    die("Aucun enseignant associé à ce compte utilisateur.");
+}
+
+$idEnseignant = $enseignant["id_enseignant"];
+
+$statutFiltre = $_GET["statut"] ?? "";
+
+$where = "ap.id_enseignant = ?";
+$params = [$idEnseignant];
+
+if($statutFiltre !== ""){
+    $where .= " AND ap.statut_validation = ?";
+    $params[] = $statutFiltre;
 }
 
 $stmtActivites = $pdo->prepare("
-    SELECT 
+    SELECT
         ap.id_activite,
         ap.type_activite,
         ap.niveau_complexite,
@@ -33,144 +52,329 @@ $stmtActivites = $pdo->prepare("
         ap.volume_horaire_calcule,
         ap.statut_validation,
         ap.date_saisie,
-        c.intitule_cours,
-        r.titre_ressource
+        ap.observation,
+        c.intitule_cours AS cours
     FROM activite_pedagogique ap
-    JOIN cours c ON c.id_cours = ap.id_cours
-    LEFT JOIN ressource_pedagogique r ON r.id_ressource = ap.id_ressource
-    WHERE ap.id_enseignant = ?
+    LEFT JOIN cours c ON c.id_cours = ap.id_cours
+    WHERE $where
     ORDER BY ap.date_saisie DESC
 ");
-$stmtActivites->execute([$enseignant["id_enseignant"]]);
+
+$stmtActivites->execute($params);
 $activites = $stmtActivites->fetchAll(PDO::FETCH_ASSOC);
+
+$totalActivites = count($activites);
 
 ?>
 
-<?php require_once "../includes/header.php"; ?>
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>Mes activités pédagogiques</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-<div class="wrapper">
+    <style>
+        *{
+            box-sizing:border-box;
+            font-family:Arial, Helvetica, sans-serif;
+        }
 
-    <?php require_once "../includes/sidebar_enseignant.php"; ?>
+        body{
+            margin:0;
+            background:#f1f5f9;
+            color:#0f172a;
+        }
 
-    <main class="main">
+        .container{
+            padding:30px;
+        }
 
-        <header class="topbar">
+        .top-card{
+            background:white;
+            padding:25px;
+            border-radius:18px;
+            margin-bottom:22px;
+            box-shadow:0 8px 20px rgba(0,0,0,.08);
+            display:flex;
+            justify-content:space-between;
+            gap:20px;
+            flex-wrap:wrap;
+        }
+
+        .top-card h1{
+            margin:0;
+            font-size:26px;
+            color:#1e3a8a;
+        }
+
+        .top-card p{
+            margin:8px 0 0;
+            color:#475569;
+        }
+
+        .btn-back{
+            background:#1e3a8a;
+            color:white;
+            text-decoration:none;
+            padding:12px 16px;
+            border-radius:10px;
+            font-weight:bold;
+            height:max-content;
+        }
+
+        .filter-card{
+            background:white;
+            padding:22px;
+            border-radius:18px;
+            margin-bottom:22px;
+            box-shadow:0 8px 20px rgba(0,0,0,.08);
+        }
+
+        .filter-form{
+            display:grid;
+            grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+            gap:16px;
+            align-items:end;
+        }
+
+        label{
+            font-weight:bold;
+            color:#334155;
+            font-size:14px;
+        }
+
+        select{
+            width:100%;
+            margin-top:7px;
+            padding:13px;
+            border:1px solid #cbd5e1;
+            border-radius:10px;
+            font-size:14px;
+            background:white;
+        }
+
+        .btn{
+            border:none;
+            padding:13px 18px;
+            border-radius:10px;
+            color:white;
+            font-weight:bold;
+            cursor:pointer;
+            text-decoration:none;
+            text-align:center;
+            display:inline-block;
+        }
+
+        .btn-blue{
+            background:#2563eb;
+        }
+
+        .btn-gray{
+            background:#64748b;
+        }
+
+        .stat-card{
+            background:white;
+            padding:24px;
+            border-radius:18px;
+            box-shadow:0 8px 20px rgba(0,0,0,.08);
+            margin-bottom:22px;
+        }
+
+        .stat-card h3{
+            margin:0 0 12px;
+            font-size:15px;
+            color:#64748b;
+        }
+
+        .stat-card strong{
+            font-size:34px;
+            color:#1e3a8a;
+        }
+
+        .table-card{
+            background:white;
+            padding:24px;
+            border-radius:18px;
+            box-shadow:0 8px 20px rgba(0,0,0,.08);
+            overflow-x:auto;
+        }
+
+        table{
+            width:100%;
+            border-collapse:collapse;
+            min-width:950px;
+            font-size:14px;
+        }
+
+        th{
+            background:#1e1b4b;
+            color:white;
+            text-align:left;
+            padding:13px;
+        }
+
+        td{
+            padding:13px;
+            border-bottom:1px solid #e2e8f0;
+        }
+
+        .badge{
+            padding:6px 10px;
+            border-radius:999px;
+            font-weight:bold;
+            font-size:12px;
+        }
+
+        .validee{
+            background:#dcfce7;
+            color:#166534;
+        }
+
+        .attente{
+            background:#fef3c7;
+            color:#92400e;
+        }
+
+        .rejetee{
+            background:#fee2e2;
+            color:#991b1b;
+        }
+
+        @media(max-width:768px){
+            .container{
+                padding:16px;
+            }
+
+            .top-card h1{
+                font-size:22px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="container">
+
+    <div class="top-card">
+        <div>
+            <h1>Mes activités pédagogiques</h1>
+            <p>
+                Enseignant :
+                <strong><?= htmlspecialchars($enseignant["nom"] . " " . $enseignant["prenoms"]) ?></strong>
+                —
+                Grade :
+                <strong><?= htmlspecialchars($enseignant["libelle_grade"] ?? "Non défini") ?></strong>
+                —
+                Statut :
+                <strong><?= htmlspecialchars($enseignant["statut"]) ?></strong>
+            </p>
+        </div>
+
+        <a href="dashboard.php" class="btn-back">← Retour au dashboard</a>
+    </div>
+
+    <div class="filter-card">
+        <form method="GET" class="filter-form">
+
             <div>
-                <h1>Mes activités pédagogiques</h1>
-                <p>Consultation des activités pédagogiques qui me sont attribuées.</p>
+                <label>Filtrer par statut</label>
+                <select name="statut">
+                    <option value="">Toutes les activités</option>
+                    <option value="EN_ATTENTE" <?= $statutFiltre === "EN_ATTENTE" ? "selected" : "" ?>>
+                        En attente
+                    </option>
+                    <option value="VALIDEE" <?= $statutFiltre === "VALIDEE" ? "selected" : "" ?>>
+                        Validée
+                    </option>
+                    <option value="REJETEE" <?= $statutFiltre === "REJETEE" ? "selected" : "" ?>>
+                        Rejetée
+                    </option>
+                </select>
             </div>
 
-            <div class="user-box">
-                <span><?= date("d/m/Y") ?></span>
-                <strong><?= htmlspecialchars($_SESSION["login"]) ?></strong>
-                <small>ENSEIGNANT</small>
-            </div>
-        </header>
+            <button type="submit" class="btn btn-blue">Filtrer</button>
 
-        <section class="content">
+            <a href="mes_activites.php" class="btn btn-gray">Réinitialiser</a>
 
-            <div class="welcome-card">
-                <h2>
-                    <?= htmlspecialchars($enseignant["nom"] . " " . $enseignant["prenoms"]) ?>
-                </h2>
-                <p>
-                    Statut :
-                    <strong><?= htmlspecialchars($enseignant["statut"]) ?></strong>
-                </p>
-            </div>
+        </form>
+    </div>
 
-            <div class="table-card">
+    <div class="stat-card">
+        <h3>Total des activités trouvées</h3>
+        <strong><?= $totalActivites ?></strong>
+    </div>
 
-                <div class="table-header">
-                    <h2>Liste de mes activités</h2>
+    <div class="table-card">
 
-                    <a href="dashboard.php" class="btn-secondary">
-                        Retour
-                    </a>
-                </div>
+        <h2>Liste de mes activités pédagogiques</h2>
 
-                <table class="data-table">
-                    <thead>
+        <table>
+            <thead>
+                <tr>
+                    <th>Date saisie</th>
+                    <th>Cours</th>
+                    <th>Type activité</th>
+                    <th>Niveau</th>
+                    <th>Heures</th>
+                    <th>Séquences</th>
+                    <th>Volume calculé</th>
+                    <th>Statut</th>
+                    <th>Observation</th>
+                </tr>
+            </thead>
+
+            <tbody>
+
+                <?php if(empty($activites)): ?>
+
+                    <tr>
+                        <td colspan="9">Aucune activité pédagogique trouvée.</td>
+                    </tr>
+
+                <?php else: ?>
+
+                    <?php foreach($activites as $activite): ?>
+
+                        <?php
+                            $classeBadge = "attente";
+
+                            if($activite["statut_validation"] === "VALIDEE"){
+                                $classeBadge = "validee";
+                            }
+                            elseif($activite["statut_validation"] === "REJETEE"){
+                                $classeBadge = "rejetee";
+                            }
+                        ?>
+
                         <tr>
-                            <th>Date</th>
-                            <th>Cours</th>
-                            <th>Ressource</th>
-                            <th>Type</th>
-                            <th>Niveau</th>
-                            <th>Heures</th>
-                            <th>Séquences</th>
-                            <th>Volume calculé</th>
-                            <th>Statut</th>
+                            <td><?= htmlspecialchars($activite["date_saisie"]) ?></td>
+                            <td><?= htmlspecialchars($activite["cours"] ?? "Non renseigné") ?></td>
+                            <td><?= htmlspecialchars($activite["type_activite"]) ?></td>
+                            <td><?= htmlspecialchars($activite["niveau_complexite"]) ?></td>
+                            <td><?= number_format((float)$activite["nombre_heures"], 2, ',', ' ') ?> h</td>
+                            <td><?= htmlspecialchars($activite["nb_sequences"]) ?></td>
+                            <td><?= number_format((float)$activite["volume_horaire_calcule"], 2, ',', ' ') ?> h</td>
+                            <td>
+                                <span class="badge <?= $classeBadge ?>">
+                                    <?= htmlspecialchars($activite["statut_validation"]) ?>
+                                </span>
+                            </td>
+                            <td><?= htmlspecialchars($activite["observation"]) ?></td>
                         </tr>
-                    </thead>
 
-                    <tbody>
-                        <?php if(count($activites) > 0): ?>
+                    <?php endforeach; ?>
 
-                            <?php foreach($activites as $a): ?>
-                                <tr>
-                                    <td>
-                                        <?= date("d/m/Y", strtotime($a["date_saisie"])) ?>
-                                    </td>
+                <?php endif; ?>
 
-                                    <td>
-                                        <?= htmlspecialchars($a["intitule_cours"]) ?>
-                                    </td>
+            </tbody>
+        </table>
 
-                                    <td>
-                                        <?= htmlspecialchars($a["titre_ressource"] ?? "Non précisée") ?>
-                                    </td>
-
-                                    <td>
-                                        <?= htmlspecialchars($a["type_activite"]) ?>
-                                    </td>
-
-                                    <td>
-                                        <?= htmlspecialchars($a["niveau_complexite"]) ?>
-                                    </td>
-
-                                    <td>
-                                        <?= number_format($a["nombre_heures"], 2, ',', ' ') ?> h
-                                    </td>
-
-                                    <td>
-                                        <?= htmlspecialchars($a["nb_sequences"]) ?>
-                                    </td>
-
-                                    <td>
-                                        <?= number_format($a["volume_horaire_calcule"], 2, ',', ' ') ?> h
-                                    </td>
-
-                                    <td>
-                                        <?php if($a["statut_validation"] === "VALIDEE"): ?>
-                                            <span class="badge success">VALIDÉE</span>
-                                        <?php elseif($a["statut_validation"] === "REJETEE"): ?>
-                                            <span class="badge danger">REJETÉE</span>
-                                        <?php else: ?>
-                                            <span class="badge warning">EN ATTENTE</span>
-                                        <?php endif; ?>
-                                    </td>
-                                </tr>
-                            <?php endforeach; ?>
-
-                        <?php else: ?>
-
-                            <tr>
-                                <td colspan="9" class="empty">
-                                    Aucune activité pédagogique ne vous est encore attribuée.
-                                </td>
-                            </tr>
-
-                        <?php endif; ?>
-                    </tbody>
-                </table>
-
-            </div>
-
-        </section>
-
-        <?php require_once "../includes/footer.php"; ?>
-
-    </main>
+    </div>
 
 </div>
+
+</body>
+</html>

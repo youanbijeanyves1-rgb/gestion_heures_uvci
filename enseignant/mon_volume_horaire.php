@@ -10,281 +10,358 @@ if($_SESSION["role"] !== "ENSEIGNANT"){
 
 $idUtilisateur = $_SESSION["id_utilisateur"];
 
-$dateDebut = $_GET["date_debut"] ?? "";
-$dateFin   = $_GET["date_fin"] ?? "";
-
 $stmtEns = $pdo->prepare("
     SELECT 
         e.id_enseignant,
         e.nom,
         e.prenoms,
         e.statut,
-        g.libelle_grade,
-        g.charge_statutaire
+        g.libelle_grade
     FROM enseignant e
     LEFT JOIN grade g ON g.id_grade = e.id_grade
     WHERE e.id_utilisateur = ?
     LIMIT 1
 ");
-
 $stmtEns->execute([$idUtilisateur]);
 $enseignant = $stmtEns->fetch(PDO::FETCH_ASSOC);
 
 if(!$enseignant){
-    die("Aucun profil enseignant n’est lié à ce compte utilisateur.");
+    die("Aucun enseignant associé à ce compte utilisateur.");
 }
 
-$sqlVolume = "
+$idEnseignant = $enseignant["id_enseignant"];
+
+$dateDebut = $_GET["date_debut"] ?? "";
+$dateFin = $_GET["date_fin"] ?? "";
+
+$where = "ap.id_enseignant = ? AND ap.statut_validation = 'VALIDEE'";
+$params = [$idEnseignant];
+
+if($dateDebut !== ""){
+    $where .= " AND DATE(ap.date_saisie) >= ?";
+    $params[] = $dateDebut;
+}
+
+if($dateFin !== ""){
+    $where .= " AND DATE(ap.date_saisie) <= ?";
+    $params[] = $dateFin;
+}
+
+$stmtStats = $pdo->prepare("
     SELECT 
-        COUNT(*) AS total_activites_validees,
-        COALESCE(SUM(nombre_heures), 0) AS total_heures_saisies,
-        COALESCE(SUM(nb_sequences), 0) AS total_sequences,
-        COALESCE(SUM(volume_horaire_calcule), 0) AS volume_horaire_total
-    FROM activite_pedagogique
-    WHERE id_enseignant = :id_enseignant
-      AND statut_validation = 'VALIDEE'
-";
+        COUNT(*) AS total_activites,
+        COALESCE(SUM(ap.volume_horaire_calcule), 0) AS total_volume
+    FROM activite_pedagogique ap
+    WHERE $where
+");
+$stmtStats->execute($params);
+$stats = $stmtStats->fetch(PDO::FETCH_ASSOC);
 
-$paramsVolume = [
-    "id_enseignant" => $enseignant["id_enseignant"]
-];
+$totalActivites = (int)$stats["total_activites"];
+$totalVolume = (float)$stats["total_volume"];
 
-if($dateDebut !== "" && $dateFin !== ""){
-    $sqlVolume .= "
-        AND DATE(date_saisie) BETWEEN :date_debut AND :date_fin
-    ";
-
-    $paramsVolume["date_debut"] = $dateDebut;
-    $paramsVolume["date_fin"] = $dateFin;
-}
-
-$stmtVolume = $pdo->prepare($sqlVolume);
-$stmtVolume->execute($paramsVolume);
-$volume = $stmtVolume->fetch(PDO::FETCH_ASSOC);
-
-$sqlDetails = "
-    SELECT
-        ap.date_saisie,
-        c.intitule_cours,
-        r.titre_ressource,
+$stmtActivites = $pdo->prepare("
+    SELECT 
+        ap.observation,
         ap.type_activite,
         ap.niveau_complexite,
-        ap.nombre_heures,
         ap.nb_sequences,
-        ap.volume_horaire_calcule
+        ap.volume_horaire_calcule,
+        ap.date_saisie,
+        c.intitule_cours AS cours
     FROM activite_pedagogique ap
-    JOIN cours c ON c.id_cours = ap.id_cours
-    LEFT JOIN ressource_pedagogique r ON r.id_ressource = ap.id_ressource
-    WHERE ap.id_enseignant = :id_enseignant
-      AND ap.statut_validation = 'VALIDEE'
-";
-
-$paramsDetails = [
-    "id_enseignant" => $enseignant["id_enseignant"]
-];
-
-if($dateDebut !== "" && $dateFin !== ""){
-    $sqlDetails .= "
-        AND DATE(ap.date_saisie) BETWEEN :date_debut AND :date_fin
-    ";
-
-    $paramsDetails["date_debut"] = $dateDebut;
-    $paramsDetails["date_fin"] = $dateFin;
-}
-
-$sqlDetails .= "
+    LEFT JOIN cours c ON c.id_cours = ap.id_cours
+    WHERE $where
     ORDER BY ap.date_saisie DESC
-";
-
-$stmtDetails = $pdo->prepare($sqlDetails);
-$stmtDetails->execute($paramsDetails);
-$details = $stmtDetails->fetchAll(PDO::FETCH_ASSOC);
+");
+$stmtActivites->execute($params);
+$activites = $stmtActivites->fetchAll(PDO::FETCH_ASSOC);
 
 ?>
 
-<?php require_once "../includes/header.php"; ?>
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>Mon volume horaire</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-<div class="wrapper">
+    <style>
+        *{
+            box-sizing:border-box;
+            font-family:Arial, Helvetica, sans-serif;
+        }
 
-    <?php require_once "../includes/sidebar_enseignant.php"; ?>
+        body{
+            margin:0;
+            background:#f1f5f9;
+            color:#0f172a;
+        }
 
-    <main class="main">
+        .container{
+            padding:30px;
+        }
 
-        <header class="topbar">
+        .top-card{
+            background:white;
+            padding:25px;
+            border-radius:18px;
+            margin-bottom:22px;
+            box-shadow:0 8px 20px rgba(0,0,0,.08);
+            display:flex;
+            justify-content:space-between;
+            gap:20px;
+            flex-wrap:wrap;
+        }
+
+        .top-card h1{
+            margin:0;
+            font-size:26px;
+            color:#1e3a8a;
+        }
+
+        .top-card p{
+            margin:8px 0 0;
+            color:#475569;
+        }
+
+        .btn-back{
+            background:#1e3a8a;
+            color:white;
+            text-decoration:none;
+            padding:12px 16px;
+            border-radius:10px;
+            font-weight:bold;
+            height:max-content;
+        }
+
+        .filter-card{
+            background:white;
+            padding:22px;
+            border-radius:18px;
+            margin-bottom:22px;
+            box-shadow:0 8px 20px rgba(0,0,0,.08);
+        }
+
+        .filter-form{
+            display:grid;
+            grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+            gap:16px;
+            align-items:end;
+        }
+
+        label{
+            font-weight:bold;
+            color:#334155;
+            font-size:14px;
+        }
+
+        input{
+            width:100%;
+            margin-top:7px;
+            padding:13px;
+            border:1px solid #cbd5e1;
+            border-radius:10px;
+            font-size:14px;
+        }
+
+        .btn{
+            border:none;
+            padding:13px 18px;
+            border-radius:10px;
+            color:white;
+            font-weight:bold;
+            cursor:pointer;
+            text-decoration:none;
+            text-align:center;
+            display:inline-block;
+        }
+
+        .btn-blue{
+            background:#2563eb;
+        }
+
+        .btn-gray{
+            background:#64748b;
+        }
+
+        .stats{
+            display:grid;
+            grid-template-columns:repeat(auto-fit,minmax(230px,1fr));
+            gap:20px;
+            margin-bottom:25px;
+        }
+
+        .stat-card{
+            background:white;
+            padding:24px;
+            border-radius:18px;
+            box-shadow:0 8px 20px rgba(0,0,0,.08);
+        }
+
+        .stat-card h3{
+            margin:0 0 12px;
+            font-size:15px;
+            color:#64748b;
+        }
+
+        .stat-card strong{
+            font-size:34px;
+            color:#1e3a8a;
+        }
+
+        .table-card{
+            background:white;
+            padding:24px;
+            border-radius:18px;
+            box-shadow:0 8px 20px rgba(0,0,0,.08);
+            overflow-x:auto;
+        }
+
+        table{
+            width:100%;
+            border-collapse:collapse;
+            min-width:850px;
+            font-size:14px;
+        }
+
+        th{
+            background:#1e1b4b;
+            color:white;
+            text-align:left;
+            padding:13px;
+        }
+
+        td{
+            padding:13px;
+            border-bottom:1px solid #e2e8f0;
+        }
+
+        .badge{
+            padding:6px 10px;
+            border-radius:999px;
+            background:#dcfce7;
+            color:#166534;
+            font-weight:bold;
+            font-size:12px;
+        }
+
+        @media(max-width:768px){
+            .container{
+                padding:16px;
+            }
+
+            .top-card h1{
+                font-size:22px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="container">
+
+    <div class="top-card">
+        <div>
+            <h1>Mon volume horaire</h1>
+            <p>
+                Enseignant :
+                <strong><?= htmlspecialchars($enseignant["nom"] . " " . $enseignant["prenoms"]) ?></strong>
+                —
+                Grade :
+                <strong><?= htmlspecialchars($enseignant["libelle_grade"] ?? "Non défini") ?></strong>
+            </p>
+        </div>
+
+        <a href="dashboard.php" class="btn-back">← Retour au dashboard</a>
+    </div>
+
+    <div class="filter-card">
+        <form method="GET" class="filter-form">
+
             <div>
-                <h1>Mon volume horaire</h1>
-                <p>Vérification du volume horaire validé par période.</p>
+                <label>Date début</label>
+                <input type="date" name="date_debut" value="<?= htmlspecialchars($dateDebut) ?>">
             </div>
 
-            <div class="user-box">
-                <span><?= date("d/m/Y") ?></span>
-                <strong><?= htmlspecialchars($_SESSION["login"]) ?></strong>
-                <small>ENSEIGNANT</small>
-            </div>
-        </header>
-
-        <section class="content">
-
-            <div class="welcome-card">
-                <h2>
-                    <?= htmlspecialchars($enseignant["nom"] . " " . $enseignant["prenoms"]) ?>
-                </h2>
-
-                <p>
-                    Grade :
-                    <strong><?= htmlspecialchars($enseignant["libelle_grade"] ?? "Non défini") ?></strong>
-                    —
-                    Statut :
-                    <strong><?= htmlspecialchars($enseignant["statut"]) ?></strong>
-                </p>
+            <div>
+                <label>Date fin</label>
+                <input type="date" name="date_fin" value="<?= htmlspecialchars($dateFin) ?>">
             </div>
 
-            <div class="filter-card">
+            <button type="submit" class="btn btn-blue">Filtrer</button>
 
-                <form method="GET" class="filter-form">
+            <a href="mon_volume_horaire.php" class="btn btn-gray">Réinitialiser</a>
 
-                    <div class="form-group">
-                        <label>Date début</label>
-                        <input 
-                            type="date" 
-                            name="date_debut"
-                            value="<?= htmlspecialchars($dateDebut) ?>"
-                        >
-                    </div>
+        </form>
+    </div>
 
-                    <div class="form-group">
-                        <label>Date fin</label>
-                        <input 
-                            type="date" 
-                            name="date_fin"
-                            value="<?= htmlspecialchars($dateFin) ?>"
-                        >
-                    </div>
+    <div class="stats">
 
-                    <button type="submit" class="btn-primary">
-                        Filtrer
-                    </button>
+        <div class="stat-card">
+            <h3>Activités validées</h3>
+            <strong><?= $totalActivites ?></strong>
+        </div>
 
-                    <a href="mon_volume_horaire.php" class="btn-secondary">
-                        Réinitialiser
-                    </a>
+        <div class="stat-card">
+            <h3>Volume horaire validé</h3>
+            <strong><?= number_format($totalVolume, 2, ',', ' ') ?> h</strong>
+        </div>
 
-                </form>
+    </div>
 
-            </div>
+    <div class="table-card">
 
-            <div class="cards">
+        <h2>Détail des activités validées</h2>
 
-                <div class="card">
-                    <h3>Activités validées</h3>
-                    <p><?= (int)$volume["total_activites_validees"] ?></p>
-                </div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Date saisie</th>
+                    <th>Cours</th>
+                    <th>Type activité</th>
+                    <th>Niveau</th>
+                    <th>Séquences</th>
+                    <th>Volume</th>
+                    <th>Statut</th>
+                    <th>Observation</th>
+                </tr>
+            </thead>
 
-                <div class="card">
-                    <h3>Heures saisies</h3>
-                    <p><?= number_format($volume["total_heures_saisies"], 2, ',', ' ') ?></p>
-                    <small>heures</small>
-                </div>
+            <tbody>
 
-                <div class="card">
-                    <h3>Séquences</h3>
-                    <p><?= number_format($volume["total_sequences"], 0, ',', ' ') ?></p>
-                    <small>séquences</small>
-                </div>
+                <?php if(empty($activites)): ?>
 
-                <div class="card">
-                    <h3>Volume horaire validé</h3>
-                    <p><?= number_format($volume["volume_horaire_total"], 2, ',', ' ') ?></p>
-                    <small>heures</small>
-                </div>
+                    <tr>
+                        <td colspan="8">Aucune activité validée trouvée pour cette période.</td>
+                    </tr>
 
-            </div>
+                <?php else: ?>
 
-            <br>
+                    <?php foreach($activites as $activite): ?>
 
-            <div class="table-card">
-
-                <div class="table-header">
-                    <h2>Détail du volume horaire validé</h2>
-
-                    <a href="dashboard.php" class="btn-secondary">
-                        Retour
-                    </a>
-                </div>
-
-                <table class="data-table">
-                    <thead>
                         <tr>
-                            <th>Date</th>
-                            <th>Cours</th>
-                            <th>Ressource</th>
-                            <th>Type</th>
-                            <th>Niveau</th>
-                            <th>Heures</th>
-                            <th>Séquences</th>
-                            <th>Volume calculé</th>
+                            <td><?= htmlspecialchars($activite["date_saisie"]) ?></td>
+                            <td><?= htmlspecialchars($activite["cours"] ?? "Non renseigné") ?></td>
+                            <td><?= htmlspecialchars($activite["type_activite"]) ?></td>
+                            <td><?= htmlspecialchars($activite["niveau_complexite"]) ?></td>
+                            <td><?= htmlspecialchars($activite["nb_sequences"]) ?></td>
+                            <td><?= number_format((float)$activite["volume_horaire_calcule"], 2, ',', ' ') ?> h</td>
+                            <td><span class="badge">VALIDÉE</span></td>
+                            <td><?= htmlspecialchars($activite["observation"]) ?></td>
                         </tr>
-                    </thead>
 
-                    <tbody>
-                        <?php if(count($details) > 0): ?>
+                    <?php endforeach; ?>
 
-                            <?php foreach($details as $d): ?>
-                                <tr>
-                                    <td>
-                                        <?= date("d/m/Y", strtotime($d["date_saisie"])) ?>
-                                    </td>
+                <?php endif; ?>
 
-                                    <td>
-                                        <?= htmlspecialchars($d["intitule_cours"]) ?>
-                                    </td>
+            </tbody>
+        </table>
 
-                                    <td>
-                                        <?= htmlspecialchars($d["titre_ressource"] ?? "Non précisée") ?>
-                                    </td>
-
-                                    <td>
-                                        <?= htmlspecialchars($d["type_activite"]) ?>
-                                    </td>
-
-                                    <td>
-                                        <?= htmlspecialchars($d["niveau_complexite"]) ?>
-                                    </td>
-
-                                    <td>
-                                        <?= number_format($d["nombre_heures"], 2, ',', ' ') ?> h
-                                    </td>
-
-                                    <td>
-                                        <?= htmlspecialchars($d["nb_sequences"]) ?>
-                                    </td>
-
-                                    <td>
-                                        <strong>
-                                            <?= number_format($d["volume_horaire_calcule"], 2, ',', ' ') ?> h
-                                        </strong>
-                                    </td>
-                                </tr>
-                            <?php endforeach; ?>
-
-                        <?php else: ?>
-
-                            <tr>
-                                <td colspan="8" class="empty">
-                                    Aucune activité validée pour cette période.
-                                </td>
-                            </tr>
-
-                        <?php endif; ?>
-                    </tbody>
-                </table>
-
-            </div>
-
-        </section>
-
-        <?php require_once "../includes/footer.php"; ?>
-
-    </main>
+    </div>
 
 </div>
+
+</body>
+</html>

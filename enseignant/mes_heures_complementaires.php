@@ -10,9 +10,6 @@ if($_SESSION["role"] !== "ENSEIGNANT"){
 
 $idUtilisateur = $_SESSION["id_utilisateur"];
 
-$dateDebut = $_GET["date_debut"] ?? "";
-$dateFin   = $_GET["date_fin"] ?? "";
-
 $stmtEns = $pdo->prepare("
     SELECT 
         e.id_enseignant,
@@ -26,183 +23,400 @@ $stmtEns = $pdo->prepare("
     WHERE e.id_utilisateur = ?
     LIMIT 1
 ");
+
 $stmtEns->execute([$idUtilisateur]);
 $enseignant = $stmtEns->fetch(PDO::FETCH_ASSOC);
 
 if(!$enseignant){
-    die("Aucun profil enseignant n’est lié à ce compte utilisateur.");
+    die("Aucun enseignant associé à ce compte utilisateur.");
 }
 
-$sqlVolume = "
-    SELECT 
-        COALESCE(SUM(volume_horaire_calcule), 0) AS volume_total
-    FROM activite_pedagogique
-    WHERE id_enseignant = :id_enseignant
-      AND statut_validation = 'VALIDEE'
-";
-
-$params = [
-    "id_enseignant" => $enseignant["id_enseignant"]
-];
-
-if($dateDebut !== "" && $dateFin !== ""){
-    $sqlVolume .= "
-        AND DATE(date_saisie) BETWEEN :date_debut AND :date_fin
-    ";
-
-    $params["date_debut"] = $dateDebut;
-    $params["date_fin"] = $dateFin;
-}
-
-$stmtVolume = $pdo->prepare($sqlVolume);
-$stmtVolume->execute($params);
-$resultat = $stmtVolume->fetch(PDO::FETCH_ASSOC);
-
-$volumeTotal = (float)$resultat["volume_total"];
+$idEnseignant = $enseignant["id_enseignant"];
+$statut = $enseignant["statut"];
 $chargeStatutaire = (float)($enseignant["charge_statutaire"] ?? 0);
 
-if($enseignant["statut"] === "PERMANENT"){
-    $heuresComplementaires = max(0, $volumeTotal - $chargeStatutaire);
-    $messageHC = number_format($heuresComplementaires, 2, ',', ' ') . " h";
-}else{
-    $heuresComplementaires = null;
-    $messageHC = "Non concerné";
+$dateDebut = $_GET["date_debut"] ?? "";
+$dateFin = $_GET["date_fin"] ?? "";
+
+$where = "ap.id_enseignant = ? AND ap.statut_validation = 'VALIDEE'";
+$params = [$idEnseignant];
+
+if($dateDebut !== ""){
+    $where .= " AND DATE(ap.date_saisie) >= ?";
+    $params[] = $dateDebut;
 }
+
+if($dateFin !== ""){
+    $where .= " AND DATE(ap.date_saisie) <= ?";
+    $params[] = $dateFin;
+}
+
+$stmtStats = $pdo->prepare("
+    SELECT 
+        COUNT(*) AS total_activites,
+        COALESCE(SUM(ap.volume_horaire_calcule), 0) AS volume_valide
+    FROM activite_pedagogique ap
+    WHERE $where
+");
+
+$stmtStats->execute($params);
+$stats = $stmtStats->fetch(PDO::FETCH_ASSOC);
+
+$totalActivites = (int)$stats["total_activites"];
+$volumeValide = (float)$stats["volume_valide"];
+
+$heuresComplementaires = 0;
+$messageStatut = "";
+
+if($statut === "VACATAIRE"){
+    $messageStatut = "Les vacataires ne sont pas concernés par les heures complémentaires.";
+}else{
+    $heuresComplementaires = max(0, $volumeValide - $chargeStatutaire);
+    $messageStatut = "Calcul : volume horaire validé - charge statutaire.";
+}
+
+$stmtActivites = $pdo->prepare("
+    SELECT 
+        ap.observation,
+        ap.type_activite,
+        ap.niveau_complexite,
+        ap.nb_sequences,
+        ap.volume_horaire_calcule,
+        ap.date_saisie,
+        c.intitule_cours AS cours
+    FROM activite_pedagogique ap
+    LEFT JOIN cours c ON c.id_cours = ap.id_cours
+    WHERE $where
+    ORDER BY ap.date_saisie DESC
+");
+
+$stmtActivites->execute($params);
+$activites = $stmtActivites->fetchAll(PDO::FETCH_ASSOC);
 
 ?>
 
-<?php require_once "../includes/header.php"; ?>
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>Mes heures complémentaires</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-<div class="wrapper">
+    <style>
+        *{
+            box-sizing:border-box;
+            font-family:Arial, Helvetica, sans-serif;
+        }
 
-    <?php require_once "../includes/sidebar_enseignant.php"; ?>
+        body{
+            margin:0;
+            background:#f1f5f9;
+            color:#0f172a;
+        }
 
-    <main class="main">
+        .container{
+            padding:30px;
+        }
 
-        <header class="topbar">
+        .top-card{
+            background:white;
+            padding:25px;
+            border-radius:18px;
+            margin-bottom:22px;
+            box-shadow:0 8px 20px rgba(0,0,0,.08);
+            display:flex;
+            justify-content:space-between;
+            gap:20px;
+            flex-wrap:wrap;
+        }
+
+        .top-card h1{
+            margin:0;
+            font-size:26px;
+            color:#9a3412;
+        }
+
+        .top-card p{
+            margin:8px 0 0;
+            color:#475569;
+        }
+
+        .btn-back{
+            background:#1e3a8a;
+            color:white;
+            text-decoration:none;
+            padding:12px 16px;
+            border-radius:10px;
+            font-weight:bold;
+            height:max-content;
+        }
+
+        .filter-card{
+            background:white;
+            padding:22px;
+            border-radius:18px;
+            margin-bottom:22px;
+            box-shadow:0 8px 20px rgba(0,0,0,.08);
+        }
+
+        .filter-form{
+            display:grid;
+            grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+            gap:16px;
+            align-items:end;
+        }
+
+        label{
+            font-weight:bold;
+            color:#334155;
+            font-size:14px;
+        }
+
+        input{
+            width:100%;
+            margin-top:7px;
+            padding:13px;
+            border:1px solid #cbd5e1;
+            border-radius:10px;
+            font-size:14px;
+        }
+
+        .btn{
+            border:none;
+            padding:13px 18px;
+            border-radius:10px;
+            color:white;
+            font-weight:bold;
+            cursor:pointer;
+            text-decoration:none;
+            text-align:center;
+            display:inline-block;
+        }
+
+        .btn-orange{
+            background:#c2410c;
+        }
+
+        .btn-gray{
+            background:#64748b;
+        }
+
+        .stats{
+            display:grid;
+            grid-template-columns:repeat(auto-fit,minmax(230px,1fr));
+            gap:20px;
+            margin-bottom:25px;
+        }
+
+        .stat-card{
+            background:white;
+            padding:24px;
+            border-radius:18px;
+            box-shadow:0 8px 20px rgba(0,0,0,.08);
+        }
+
+        .stat-card h3{
+            margin:0 0 12px;
+            font-size:15px;
+            color:#64748b;
+        }
+
+        .stat-card strong{
+            font-size:32px;
+            color:#9a3412;
+        }
+
+        .info-card{
+            background:#fff7ed;
+            border-left:5px solid #ea580c;
+            padding:18px;
+            border-radius:12px;
+            margin-bottom:22px;
+            color:#7c2d12;
+            font-weight:bold;
+        }
+
+        .table-card{
+            background:white;
+            padding:24px;
+            border-radius:18px;
+            box-shadow:0 8px 20px rgba(0,0,0,.08);
+            overflow-x:auto;
+        }
+
+        table{
+            width:100%;
+            border-collapse:collapse;
+            min-width:850px;
+            font-size:14px;
+        }
+
+        th{
+            background:#1e1b4b;
+            color:white;
+            text-align:left;
+            padding:13px;
+        }
+
+        td{
+            padding:13px;
+            border-bottom:1px solid #e2e8f0;
+        }
+
+        .badge{
+            padding:6px 10px;
+            border-radius:999px;
+            background:#dcfce7;
+            color:#166534;
+            font-weight:bold;
+            font-size:12px;
+        }
+
+        @media(max-width:768px){
+            .container{
+                padding:16px;
+            }
+
+            .top-card h1{
+                font-size:22px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="container">
+
+    <div class="top-card">
+        <div>
+            <h1>Mes heures complémentaires</h1>
+            <p>
+                Enseignant :
+                <strong><?= htmlspecialchars($enseignant["nom"] . " " . $enseignant["prenoms"]) ?></strong>
+                —
+                Grade :
+                <strong><?= htmlspecialchars($enseignant["libelle_grade"] ?? "Non défini") ?></strong>
+                —
+                Statut :
+                <strong><?= htmlspecialchars($statut) ?></strong>
+            </p>
+        </div>
+
+        <a href="dashboard.php" class="btn-back">← Retour au dashboard</a>
+    </div>
+
+    <div class="filter-card">
+        <form method="GET" class="filter-form">
+
             <div>
-                <h1>Mes heures complémentaires</h1>
-                <p>Suivi des heures complémentaires par période.</p>
+                <label>Date début</label>
+                <input type="date" name="date_debut" value="<?= htmlspecialchars($dateDebut) ?>">
             </div>
 
-            <div class="user-box">
-                <span><?= date("d/m/Y") ?></span>
-                <strong><?= htmlspecialchars($_SESSION["login"]) ?></strong>
-                <small>ENSEIGNANT</small>
-            </div>
-        </header>
-
-        <section class="content">
-
-            <div class="welcome-card">
-                <h2>
-                    <?= htmlspecialchars($enseignant["nom"] . " " . $enseignant["prenoms"]) ?>
-                </h2>
-
-                <p>
-                    Grade :
-                    <strong><?= htmlspecialchars($enseignant["libelle_grade"] ?? "Non défini") ?></strong>
-                    —
-                    Statut :
-                    <strong><?= htmlspecialchars($enseignant["statut"]) ?></strong>
-                </p>
+            <div>
+                <label>Date fin</label>
+                <input type="date" name="date_fin" value="<?= htmlspecialchars($dateFin) ?>">
             </div>
 
-            <div class="filter-card">
-                <form method="GET" class="filter-form">
+            <button type="submit" class="btn btn-orange">Calculer</button>
 
-                    <div class="form-group">
-                        <label>Date début</label>
-                        <input 
-                            type="date" 
-                            name="date_debut"
-                            value="<?= htmlspecialchars($dateDebut) ?>"
-                        >
-                    </div>
+            <a href="mes_heures_complementaires.php" class="btn btn-gray">Réinitialiser</a>
 
-                    <div class="form-group">
-                        <label>Date fin</label>
-                        <input 
-                            type="date" 
-                            name="date_fin"
-                            value="<?= htmlspecialchars($dateFin) ?>"
-                        >
-                    </div>
+        </form>
+    </div>
 
-                    <button type="submit" class="btn-primary">
-                        Filtrer
-                    </button>
+    <div class="info-card">
+        <?= htmlspecialchars($messageStatut) ?>
+    </div>
 
-                    <a href="mes_heures_complementaires.php" class="btn-secondary">
-                        Réinitialiser
-                    </a>
+    <div class="stats">
 
-                </form>
-            </div>
+        <div class="stat-card">
+            <h3>Activités validées</h3>
+            <strong><?= $totalActivites ?></strong>
+        </div>
 
-            <div class="cards">
+        <div class="stat-card">
+            <h3>Volume horaire validé</h3>
+            <strong><?= number_format($volumeValide, 2, ',', ' ') ?> h</strong>
+        </div>
 
-                <div class="card">
-                    <h3>Volume horaire validé</h3>
-                    <p><?= number_format($volumeTotal, 2, ',', ' ') ?></p>
-                    <small>heures</small>
-                </div>
-
-                <div class="card">
-                    <h3>Charge statutaire</h3>
-                    <p>
-                        <?php if($enseignant["statut"] === "PERMANENT"): ?>
-                            <?= number_format($chargeStatutaire, 2, ',', ' ') ?>
-                        <?php else: ?>
-                            —
-                        <?php endif; ?>
-                    </p>
-                    <small>
-                        <?= $enseignant["statut"] === "PERMANENT" ? "heures" : "Non applicable" ?>
-                    </small>
-                </div>
-
-                <div class="card">
-                    <h3>Heures complémentaires</h3>
-                    <p><?= htmlspecialchars($messageHC) ?></p>
-                    <small>
-                        <?php if($enseignant["statut"] === "PERMANENT"): ?>
-                            Volume validé - charge statutaire
-                        <?php else: ?>
-                            Les vacataires ne sont pas concernés
-                        <?php endif; ?>
-                    </small>
-                </div>
-
-            </div>
-
-            <br>
-
-            <div class="table-card">
-                <h2>Règle de calcul</h2>
-
-                <?php if($enseignant["statut"] === "PERMANENT"): ?>
-                    <p>
-                        Pour un enseignant permanent, les heures complémentaires sont calculées ainsi :
-                    </p>
-
-                    <p>
-                        <strong>
-                            Heures complémentaires = max(Volume horaire validé - Charge statutaire, 0)
-                        </strong>
-                    </p>
+        <div class="stat-card">
+            <h3>Charge statutaire</h3>
+            <strong>
+                <?php if($statut === "VACATAIRE"): ?>
+                    Non concerné
                 <?php else: ?>
-                    <p>
-                        Vous êtes enregistré comme <strong>vacataire</strong>.
-                        Les heures complémentaires ne s’appliquent pas aux vacataires.
-                    </p>
+                    <?= number_format($chargeStatutaire, 2, ',', ' ') ?> h
                 <?php endif; ?>
-            </div>
+            </strong>
+        </div>
 
-        </section>
+        <div class="stat-card">
+            <h3>Heures complémentaires</h3>
+            <strong>
+                <?php if($statut === "VACATAIRE"): ?>
+                    Non concerné
+                <?php else: ?>
+                    <?= number_format($heuresComplementaires, 2, ',', ' ') ?> h
+                <?php endif; ?>
+            </strong>
+        </div>
 
-        <?php require_once "../includes/footer.php"; ?>
+    </div>
 
-    </main>
+    <div class="table-card">
+
+        <h2>Détail des activités validées</h2>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Date saisie</th>
+                    <th>Cours</th>
+                    <th>Type activité</th>
+                    <th>Niveau</th>
+                    <th>Séquences</th>
+                    <th>Volume</th>
+                    <th>Statut</th>
+                    <th>Observation</th>
+                </tr>
+            </thead>
+
+            <tbody>
+
+                <?php if(empty($activites)): ?>
+
+                    <tr>
+                        <td colspan="8">Aucune activité validée trouvée pour cette période.</td>
+                    </tr>
+
+                <?php else: ?>
+
+                    <?php foreach($activites as $activite): ?>
+
+                        <tr>
+                            <td><?= htmlspecialchars($activite["date_saisie"]) ?></td>
+                            <td><?= htmlspecialchars($activite["cours"] ?? "Non renseigné") ?></td>
+                            <td><?= htmlspecialchars($activite["type_activite"]) ?></td>
+                            <td><?= htmlspecialchars($activite["niveau_complexite"]) ?></td>
+                            <td><?= htmlspecialchars($activite["nb_sequences"]) ?></td>
+                            <td><?= number_format((float)$activite["volume_horaire_calcule"], 2, ',', ' ') ?> h</td>
+                            <td><span class="badge">VALIDÉE</span></td>
+                            <td><?= htmlspecialchars($activite["observation"]) ?></td>
+                        </tr>
+
+                    <?php endforeach; ?>
+
+                <?php endif; ?>
+
+            </tbody>
+        </table>
+
+    </div>
 
 </div>
+
+</body>
+</html>
